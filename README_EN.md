@@ -15,7 +15,7 @@
 
 ## Fix in this fork
 
-The upstream driver keeps the SPI bus quiet for about 80 ms while the sensor captures an image. On BoF-XX, IRQ rises during that interval. The listener consumes the edge while reads are suppressed and then waits for another edge, so TLS image response `0x17` times out. This fork wakes the listener and rechecks the IRQ level when suppression ends. It also starts the quiet period in the thread that receives the capture ACK. See [D15-README_EN.md](D15-README_EN.md) for the local evidence, changed files, and rollback path.
+The upstream driver keeps the SPI bus quiet for about 80 ms while the sensor captures an image. On BoF-XX, IRQ rises during that interval. The listener consumes the edge while reads are suppressed and then waits for another edge, so TLS image response `0x17` times out. This fork wakes the listener and rechecks the IRQ level when suppression ends. It also starts the quiet period in the thread that receives the capture ACK. On 2026-11-02 the branch also merged upstream `505dc7e`: the udev rule now matches `acpi:GDIX51C0:*` when the firmware advertises a `_CID`, fixing the unbound spidev after reboot, and damaged packet headers are rejected and drained instead of being trusted. The capture quiet flag is armed inside the SPI bus lock so a late ACK cannot enter the quiet period early. See [D15-README_EN.md](D15-README_EN.md) for the local evidence, changed files, and rollback path.
 
 ## Install and use
 
