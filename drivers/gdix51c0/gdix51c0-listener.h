@@ -64,7 +64,6 @@ void gdix51c0_listener_drain_cmd (Gdix51c0Listener *self, guint8 cmd);
 /* When enabled, the listener performs NO SPI reads at all — used to keep the
  * bus silent during an image capture readout. */
 void gdix51c0_listener_set_suppress (Gdix51c0Listener *self, gboolean on);
-void gdix51c0_listener_arm_suppress_on_ack (Gdix51c0Listener *self, gboolean on);
 
 /* Send a packet on the SPI bus (outer header type=0xa0, plus payload).
  * Serializes against listener reads via the bus mutex. */
@@ -81,6 +80,16 @@ gboolean gdix51c0_listener_send_ack (Gdix51c0Listener *self,
                                      gsize             payload_len,
                                      const char       *label,
                                      GError          **error);
+
+/* Same transport, but the listener enters the capture quiet period as soon as
+ * it reads this command's ACK.  The flag is armed under the SPI bus lock, so
+ * a late or duplicate ACK cannot start the quiet period before this command
+ * has been submitted. */
+gboolean gdix51c0_listener_send_ack_quiet (Gdix51c0Listener *self,
+                                           const guint8     *payload,
+                                           gsize             payload_len,
+                                           const char       *label,
+                                           GError          **error);
 
 /* SpiSendDataToDeviceLock shape: run the ACK transport above, wait for the
  * typed data packet, and repeat that complete operation once on data timeout.

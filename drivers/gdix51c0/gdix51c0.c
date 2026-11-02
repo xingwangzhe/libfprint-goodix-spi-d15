@@ -3378,14 +3378,11 @@ gdix51c0_capture_image_raw (FpiDeviceGdix51c0 *self,
        * record) — the Goodix request cmd byte (0x22 / 0x20) is what we
        * SEND, not what we receive in the response payload. */
       gdix51c0_listener_drain_cmd (self->listener, 0x17);
-      gdix51c0_listener_arm_suppress_on_ack (self->listener, TRUE);
 
-      if (!gdix51c0_listener_send_ack (self->listener,
-                                       img_setmode, sizeof (img_setmode),
-                                       "img-setmode", &local_error))
+      if (!gdix51c0_listener_send_ack_quiet (self->listener,
+                                             img_setmode, sizeof (img_setmode),
+                                             "img-setmode", &local_error))
         {
-          gdix51c0_listener_arm_suppress_on_ack (self->listener, FALSE);
-          gdix51c0_listener_set_suppress (self->listener, FALSE);
           g_propagate_error (error, g_steal_pointer (&local_error));
           return NULL;
         }

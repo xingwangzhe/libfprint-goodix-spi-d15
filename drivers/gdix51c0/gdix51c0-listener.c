@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 /* Copyright (C) 2026 Berke Kabagöz <berkekbgz@gmail.com> */
 /* Modified 2026-10-11 by xingwangzhe <xingwangzhe@outlook.com>:
- * wake the listener after capture suppression and enter quiet mode on ACK. */
+ * wake the listener after capture suppression and enter quiet mode on ACK.
+ * Modified 2026-11-02: arm the quiet period under the SPI bus lock in the
+ * write path, so a late ACK cannot suppress the listener early. */
 
 /*
  * Goodix GDIX51C0 — async SPI listener thread.  See gdix51c0-listener.h.
@@ -447,19 +449,12 @@ gdix51c0_listener_set_suppress (Gdix51c0Listener *self, gboolean on)
     }
 }
 
-void
-gdix51c0_listener_arm_suppress_on_ack (Gdix51c0Listener *self, gboolean on)
-{
-  if (!self)
-    return;
-  g_atomic_int_set (&self->suppress_on_ack, on ? 1 : 0);
-}
-
 static gboolean
 gdix51c0_listener_write_internal (Gdix51c0Listener *self,
                                   const guint8     *payload,
                                   gsize             payload_len,
                                   gboolean          initial_submit,
+                                  gboolean          quiet_on_ack,
                                   GError          **error)
 {
   /* gfspi!SpiSendDataToDevice calls Sleep(1) once before the initial WDF
@@ -471,6 +466,11 @@ gdix51c0_listener_write_internal (Gdix51c0Listener *self,
   gboolean ok = gdix51c0_spi_write (self->dev, self->spi_fd,
                                     GDIX51C0_PKT_WRITE,
                                     payload, payload_len, error);
+  /* Arm while the bus lock is still held.  The listener reads an ACK under
+   * this same lock, so a duplicate of an earlier ACK cannot consume the flag
+   * between the write and the arming. */
+  if (ok && quiet_on_ack)
+    g_atomic_int_set (&self->suppress_on_ack, 1);
   g_mutex_unlock (&self->spi_lock);
   return ok;
 }
@@ -482,17 +482,23 @@ gdix51c0_listener_write (Gdix51c0Listener *self,
                          GError          **error)
 {
   return gdix51c0_listener_write_internal (self, payload, payload_len,
-                                            TRUE, error);
+                                            TRUE, FALSE, error);
 }
 
-gboolean
-gdix51c0_listener_send_ack (Gdix51c0Listener *self,
+static gboolean
+listener_send_ack_internal (Gdix51c0Listener *self,
                             const guint8     *payload,
                             gsize             payload_len,
                             const char       *label,
+                            gboolean          quiet_on_ack,
                             GError          **error)
 {
   g_autoptr(GError) local_error = NULL;
+
+  /* A stale arm from an earlier command must not turn an old ACK into a
+   * capture quiet period.  The write path re-arms it under spi_lock. */
+  if (quiet_on_ack)
+    g_atomic_int_set (&self->suppress_on_ack, 0);
 
   gdix51c0_listener_drain_cmd (self, GDIX51C0_PKT_READ);
 
@@ -514,8 +520,10 @@ gdix51c0_listener_send_ack (Gdix51c0Listener *self,
 #endif
 
       if (!gdix51c0_listener_write_internal (self, payload, payload_len,
-                                              attempt == 1, error))
+                                              attempt == 1, quiet_on_ack,
+                                              error))
         {
+          g_atomic_int_set (&self->suppress_on_ack, 0);
 #ifdef GOODIX_SPI_DEVELOPER
           g_atomic_int_set (&self->fault_drop_ack_armed, 0);
 #endif
@@ -540,6 +548,9 @@ gdix51c0_listener_send_ack (Gdix51c0Listener *self,
       if (!g_error_matches (local_error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT) ||
           attempt == 2)
         {
+          g_atomic_int_set (&self->suppress_on_ack, 0);
+          if (quiet_on_ack)
+            gdix51c0_listener_set_suppress (self, FALSE);
 #ifdef GOODIX_SPI_DEVELOPER
           g_atomic_int_set (&self->fault_drop_ack_armed, 0);
 #endif
@@ -549,10 +560,42 @@ gdix51c0_listener_send_ack (Gdix51c0Listener *self,
 
       fp_dbg ("gdix51c0: %s ACK timed out; immediate same-command resend",
               label);
+      if (quiet_on_ack)
+        {
+          /* A late ACK may already have suppressed the listener and queued
+           * the capture it started.  Drop both before resending so attempt 2
+           * waits for its own ACK and its own image record. */
+          g_atomic_int_set (&self->suppress_on_ack, 0);
+          gdix51c0_listener_set_suppress (self, FALSE);
+          gdix51c0_listener_drain_cmd (self, GDIX51C0_PKT_READ);
+          gdix51c0_listener_drain_cmd (self, 0x17);
+        }
       g_clear_error (&local_error);
     }
 
   g_assert_not_reached ();
+}
+
+gboolean
+gdix51c0_listener_send_ack (Gdix51c0Listener *self,
+                            const guint8     *payload,
+                            gsize             payload_len,
+                            const char       *label,
+                            GError          **error)
+{
+  return listener_send_ack_internal (self, payload, payload_len, label,
+                                     FALSE, error);
+}
+
+gboolean
+gdix51c0_listener_send_ack_quiet (Gdix51c0Listener *self,
+                                  const guint8     *payload,
+                                  gsize             payload_len,
+                                  const char       *label,
+                                  GError          **error)
+{
+  return listener_send_ack_internal (self, payload, payload_len, label,
+                                     TRUE, error);
 }
 
 guint8 *
